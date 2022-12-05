@@ -20,6 +20,7 @@ func main() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		for range c {
+			// call the context cancel() or call wp.Abort()
 			cancel()
 		}
 	}()
