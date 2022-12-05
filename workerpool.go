@@ -1,6 +1,7 @@
 package workerpool
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
@@ -12,23 +13,24 @@ type WorkerPool[T any] struct {
 	wg    sync.WaitGroup
 	wp    chan interface{}
 	queue chan T
-	fn    func(T) error
+	fn    func(context.Context, T) error
 	abort bool
 	err   error
 	m     sync.RWMutex
+	ctx   context.Context
 }
 
-// New initializes a new WorkerPool with the specified number of max concurrent workers and the
+// New initializes a new WorkerPool with the (cancellable or with deadline) context specified number of max concurrent workers and the
 // max queue length of the waiting queue and finally the function definition to execute for each payload.
 // When the function definition returns an error, the workerpool will be stopped and the Wait function will
 // return the error.
-func New[T any](workers, queuelength int, task func(param T) error) *WorkerPool[T] {
-	return &WorkerPool[T]{wp: make(chan interface{}, workers), queue: make(chan T, queuelength), fn: task, abort: false}
+func New[T any](ctx context.Context, workers, queuelength int, task func(ctx context.Context, payload T) error) *WorkerPool[T] {
+	return &WorkerPool[T]{ctx: ctx, wp: make(chan interface{}, workers), queue: make(chan T, queuelength), fn: task, abort: false}
 }
 
 // SetTask can be used to change the function used for executing the payload. This function is also
 // specified in the New function.
-func (wp *WorkerPool[T]) SetTask(fn func(param T) error) {
+func (wp *WorkerPool[T]) SetTask(fn func(ctx context.Context, payload T) error) {
 	wp.m.Lock()
 	defer wp.m.Unlock()
 	wp.fn = fn
@@ -44,6 +46,12 @@ func (wp *WorkerPool[T]) Add(param T) error {
 	}
 	if wp.err != nil {
 		return fmt.Errorf("error found, can't add more work")
+	}
+	if wp.ctx.Err() == context.Canceled {
+		return fmt.Errorf("context cancelled, can't add more work")
+	}
+	if wp.ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("context deadline exceeded, can't add more work")
 	}
 	wp.queue <- param
 	return nil
@@ -65,16 +73,26 @@ func (wp *WorkerPool[T]) Start() {
 				wp.m.RUnlock()
 				return
 			}
+			// if the last call to the task resulted in an error, stop the execution
+			if wp.ctx.Err() == context.Canceled || wp.ctx.Err() == context.DeadlineExceeded {
+				if wp.err == nil {
+					wp.err = wp.ctx.Err()
+					close(wp.queue)
+				}
+				wp.m.RUnlock()
+				return
+			}
+
 			wp.m.RUnlock()
 
 			wp.wg.Add(1)
 			wp.wp <- true
-			go func(it T, wg *sync.WaitGroup) {
+			go func(ctx context.Context, it T, wg *sync.WaitGroup) {
 				defer wg.Done()
 				defer func() { <-wp.wp }()
 
 				// if the execution of the specified Task returns an error, stop the execution and let the Wait function return the error
-				if err := wp.fn(it); err != nil {
+				if err := wp.fn(ctx, it); err != nil {
 					wp.m.Lock()
 					defer wp.m.Unlock()
 
@@ -84,7 +102,7 @@ func (wp *WorkerPool[T]) Start() {
 					}
 				}
 
-			}(it, &(wp.wg))
+			}(wp.ctx, it, &(wp.wg))
 		}
 	}()
 }
