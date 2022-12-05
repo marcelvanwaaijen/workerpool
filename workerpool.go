@@ -5,6 +5,9 @@ import (
 	"sync"
 )
 
+// WorkerPool to add similar tasks. It will execute the specified function against the added payload
+// but when the specified function returns an error or when the Abort function is called, no more
+// payload can be added and the Wait function exits as soon as all executing tasks have finished.
 type WorkerPool[T any] struct {
 	wg    sync.WaitGroup
 	wp    chan interface{}
@@ -15,22 +18,23 @@ type WorkerPool[T any] struct {
 	m     sync.RWMutex
 }
 
-// NewPool initializes a new WorkerPool with the specified number of max concurrent workers and the
+// New initializes a new WorkerPool with the specified number of max concurrent workers and the
 // max queue length of the waiting queue and finally the function definition to execute for each payload.
 // When the function definition returns an error, the workerpool will be stopped and the Wait function will
 // return the error.
-func NewPool[T any](workers, queuelength int, task func(param T) error) *WorkerPool[T] {
+func New[T any](workers, queuelength int, task func(param T) error) *WorkerPool[T] {
 	return &WorkerPool[T]{wp: make(chan interface{}, workers), queue: make(chan T, queuelength), fn: task, abort: false}
 }
 
-// SetTask can be used to change the function used for executing the payload
+// SetTask can be used to change the function used for executing the payload. This function is also
+// specified in the New function.
 func (wp *WorkerPool[T]) SetTask(fn func(param T) error) {
 	wp.m.Lock()
 	defer wp.m.Unlock()
 	wp.fn = fn
 }
 
-// Add payload to the worker pool
+// Add payload to the worker pool queue. This will be processed as soon as the Start() function is called
 func (wp *WorkerPool[T]) Add(param T) error {
 	wp.m.RLock()
 	defer wp.m.RUnlock()
